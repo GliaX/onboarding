@@ -15,6 +15,7 @@ import re
 import socket
 import ssl
 import time
+import unicodedata
 import urllib.request
 
 import wmill
@@ -30,7 +31,7 @@ USER_BASE = "ou=users," + LDAP_BASE
 GROUP_DN = "cn=emlondon,ou=groups," + LDAP_BASE
 
 # question ids in the onboarding form
-Q_FIRST, Q_LAST, Q_USER, Q_EMAIL = 391, 392, 393, 394
+Q_FIRST, Q_LAST, Q_EMAIL = 391, 392, 394
 Q_TITLE, Q_TEAM, Q_VPN, Q_INBOX = 395, 396, 397, 398
 
 # --- minimal BER/LDAP -------------------------------------------------------
@@ -219,6 +220,32 @@ def checked(ans, qid):
     return any(v in ("yes", "true", "1", "on") for v in vals)
 
 
+def slug(value):
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def surname_key(last):
+    # Hyphenated surnames use the first part: Smith-Jones -> smith.
+    return slug(last.split("-")[0])
+
+
+def allocate_uid(conn, first, last):
+    """Initial+surname, then full first.surname, then numbered full name."""
+    base = slug(first)[:1] + surname_key(last)
+    if not base:
+        return ""
+    if not conn.exists(LDAP_BASE, "uid", base):
+        return base
+    full = slug(first) + "." + surname_key(last)
+    if not conn.exists(LDAP_BASE, "uid", full):
+        return full
+    n = 2
+    while conn.exists(LDAP_BASE, "uid", "%s%d" % (full, n)):
+        n += 1
+    return "%s%d" % (full, n)
+
+
 def main():
     ldap_pw = wmill.get_variable("u/admin/ldap_admin_password")
     data = nc_get("/forms/%d/submissions" % FORM_ID)
@@ -234,9 +261,12 @@ def main():
         ans = answers_by_question(submission)
         first = text(ans, Q_FIRST)
         last = text(ans, Q_LAST)
-        uid = re.sub(r"[^a-z0-9._-]", "", text(ans, Q_USER).lower())
-        if not first or not last or len(uid) < 2 or uid[0] in "._-":
-            errors.append({"submission": submission.get("id"), "reason": "invalid first/last/username"})
+        if not first or not last:
+            errors.append({"submission": submission.get("id"), "reason": "missing first/last name"})
+            continue
+        uid = allocate_uid(conn, first, last)
+        if not uid:
+            errors.append({"submission": submission.get("id"), "reason": "could not derive username"})
             continue
 
         if conn.exists(LDAP_BASE, "uid", uid):

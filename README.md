@@ -18,7 +18,6 @@ submission arrives.
 |----|-------|-------|
 | 391 | First name | required |
 | 392 | Last name | required |
-| 393 | Username | required, used as uid |
 | 394 | Personal email | required, email validation; recorded, not the account address |
 | 395 | Job title | optional, becomes `title` |
 | 396 | Team / organisation | optional, recorded in description |
@@ -28,12 +27,24 @@ submission arrives.
 Shares are submit-only (`permissions: ["submit"]`); shares are to users, not
 public links. The form owner is `tloubani`.
 
+## Username generation
+
+There is no username field; the flow derives it (lowercase ASCII, accents
+stripped, non-alphanumerics removed):
+
+1. Initial + surname, using the first part of a hyphenated surname:
+   Tarek Loubani → `tloubani`; Ana Smith-Jones → `asmith`.
+2. If that uid is taken, try the full name with a dot:
+   Tamir Loubani (when `tloubani` exists) → `tamir.loubani`.
+3. If that is also taken, append a counter:
+   another Tamir Loubani → `tamir.loubani2`, then `tamir.loubani3`, …
+
 ## What the automation does
 
 Every 2 minutes the script:
 
 1. Fetches submissions from the Forms API as `tloubani` (app password).
-2. Skips submissions with an invalid/missing first name, last name or username.
+2. Skips submissions missing a first or last name.
 3. Skips accounts whose `uid` already exists (idempotent, so repeated polls do
    not duplicate users or email).
 4. Adds `uid=<username>,ou=users,dc=emlondon,dc=ca` with
@@ -80,9 +91,10 @@ Windmill script if the form is rebuilt.
 
 ## Verified
 
-- Test submissions created `uid=ontest`, `ontest2` and `ontest3` via the flow;
-  all were deleted afterwards, along with their submissions and `memberUid`
-  entries. The form currently has zero submissions.
+- Test submissions created `uid=tamir.loubani`, `tamir.loubani2` (collision
+  path) and `uid=asmith` (hyphenated surname); all were deleted afterwards,
+  along with their submissions and `memberUid` entries. The form currently has
+  zero submissions.
 - Second run skipped existing accounts with no errors (idempotent).
 - Created user attributes checked: `inetOrgPerson`, `posixAccount`,
   `gosaMailAccount`, `mail`, `gidNumber`, description flags, group membership.
@@ -94,8 +106,8 @@ Windmill script if the form is rebuilt.
 - The generated password is not delivered anywhere. Onboarding managers must
   set/reset it later (Luminary / Nextcloud admin).
 - Polling means up to ~2 minutes latency; a webhook trigger would be tighter.
-- The uid allocation in the script is time/random based rather than using
-  `cn=lastUID`; acceptable while accounts are mostly non-POSIX, but worth
-  aligning before wider POSIX use.
+- Usernames are derived from names (see above); the `uidNumber` allocation in
+  the script is time/random based rather than using `cn=lastUID`, acceptable
+  while accounts are mostly non-POSIX but worth aligning before wider POSIX use.
 - The form is internal to Nextcloud (no public link); the four sharees submit
   while logged in.

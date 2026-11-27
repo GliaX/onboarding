@@ -2,7 +2,7 @@
   "id": 46,
   "hash": "nTp2QmoAbCDQajer",
   "title": "New User Onboarding",
-  "description": "Submit this form to create a new Glia account. Username, contact details and access options feed the onboarding automation.",
+  "description": "Submit this form to create a new Glia account. The username is generated automatically: first initial + surname (hyphens use the first part); on collision the full first.surname is used, then numbered.",
   "owner": "tloubani",
   "shares": [
     {"shareType": 0, "shareWith": "mwaqas", "permissions": ["submit"]},
@@ -13,7 +13,6 @@
   "questions": [
     {"id": 391, "type": "short", "text": "First name", "required": true},
     {"id": 392, "type": "short", "text": "Last name", "required": true},
-    {"id": 393, "type": "short", "text": "Username (lowercase, e.g. jsmith)", "required": true},
     {"id": 394, "type": "short", "text": "Personal email address", "required": true, "extraSettings": {"validationType": "email"}},
     {"id": 395, "type": "short", "text": "Job title", "required": false},
     {"id": 396, "type": "short", "text": "Team / organisation", "required": false},
