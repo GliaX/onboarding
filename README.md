@@ -44,14 +44,17 @@ stripped, non-alphanumerics removed):
 Every 2 minutes the script:
 
 1. Fetches submissions from the Forms API as `tloubani` (app password).
-2. Skips submissions missing a first or last name.
-3. Skips accounts whose `uid` already exists (idempotent, so repeated polls do
-   not duplicate users or email).
-4. Adds `uid=<username>,ou=users,dc=emlondon,dc=ca` with
+2. Skips submissions already handled (ids tracked in
+   `u/admin/onboarding_processed`), and submissions missing a first or last name.
+3. Adds `uid=<username>,ou=users,dc=emlondon,dc=ca` with
    `inetOrgPerson` + `posixAccount` (gid 512, `/home/<uid>`, `/bin/bash`),
    a random 14-char password (SSHA-hashed), `mail=<uid>@glia.org`, title if
    given, and a description recording the VPN/email checkbox answers.
-5. Adds `memberUid` to the `emlondon` group.
+4. Adds `memberUid` to the `emlondon` group.
+5. Emails the new member at the personal address collected on the form
+   (username, temporary password, sign-in link, requested options) and emails
+   the submitter a confirmation with the same details.
+6. Records the submission id so the poll never processes it twice.
 
 It speaks LDAP directly over TLS with the Python standard library, so the
 Windmill worker does not need `ldap3` or any other package.
@@ -64,6 +67,9 @@ Secrets are workspace variables:
 
 - `u/admin/nextcloud_form_token` — Nextcloud app password for `tloubani`
 - `u/admin/ldap_admin_password` — LDAP `cn=admin` password
+- `u/admin/smtp_password` — password for `cloud@emlondon.ca` on
+  `mail.tarek.org:465` (SSL), used to send the welcome/confirmation emails
+- `u/admin/onboarding_processed` — JSON array of submission ids already handled
 
 The app password was created with:
 
@@ -95,7 +101,10 @@ Windmill script if the form is rebuilt.
   path) and `uid=asmith` (hyphenated surname); all were deleted afterwards,
   along with their submissions and `memberUid` entries. The form currently has
   zero submissions.
-- Second run skipped existing accounts with no errors (idempotent).
+- A second run on the same submission skipped it (`already_processed`) and
+  created no duplicate account; the submission-tracking variable was reset
+  after cleanup.
+- Welcome and submitter emails were delivered through `mail.tarek.org:465`.
 - Created user attributes checked: `inetOrgPerson`, `posixAccount`,
   `gosaMailAccount`, `mail`, `gidNumber`, description flags, group membership.
 
@@ -103,8 +112,8 @@ Windmill script if the form is rebuilt.
 
 - VPN and email checkboxes are **recorded only**, as requested; provisioning
   is not wired.
-- The generated password is not delivered anywhere. Onboarding managers must
-  set/reset it later (Luminary / Nextcloud admin).
+- The temporary password is emailed to the new member's personal address and
+  to the submitter; there is no forced change on first login yet.
 - Polling means up to ~2 minutes latency; a webhook trigger would be tighter.
 - Usernames are derived from names (see above); the `uidNumber` allocation in
   the script is time/random based rather than using `cn=lastUID`, acceptable

@@ -12,11 +12,13 @@ import json
 import os
 import random
 import re
+import smtplib
 import socket
 import ssl
 import time
 import unicodedata
 import urllib.request
+from email.message import EmailMessage
 
 import wmill
 
@@ -164,6 +166,37 @@ class LDAP:
             elif tag == 0x65:
                 return found
 
+    def entry(self, uid):
+        """Return attributes of uid=<uid> as {lowercase attr: [values]}."""
+        match = _tlv(0xA3, _str("uid") + _str(uid))
+        op = _tlv(0x63, _str(LDAP_BASE) + _enum(2) + _enum(0) + _int(0) + _int(0) +
+                  _tlv(0x01, b"\x00") + match + _seq())
+        self._send(op)
+        attrs = {}
+        while True:
+            tag, value = self._read()
+            if tag == 0x65:
+                return attrs
+            if tag != 0x64:
+                continue
+            _, _, pos = _parse_tlv(value, 0)          # objectName
+            if pos >= len(value):
+                continue
+            atag, aval, _ = _parse_tlv(value, pos)    # attributes
+            if atag != 0x30:
+                continue
+            q = 0
+            while q < len(aval):
+                _, attrseq, q = _parse_tlv(aval, q)
+                _, name, r = _parse_tlv(attrseq, 0)
+                _, valset, _ = _parse_tlv(attrseq, r)
+                vals = []
+                z = 0
+                while z < len(valset):
+                    _, v, z = _parse_tlv(valset, z)
+                    vals.append(v.decode(errors="ignore"))
+                attrs[name.decode(errors="ignore").lower()] = vals
+
     def add(self, dn, attributes):
         attrs = []
         for key, values in attributes.items():
@@ -246,6 +279,68 @@ def allocate_uid(conn, first, last):
     return "%s%d" % (full, n)
 
 
+def send_email(recipients, subject, body):
+    recipients = [r for r in dict.fromkeys(recipients) if r]
+    if not recipients:
+        return {"ok": False, "reason": "no recipients"}
+    smtp_password = wmill.get_variable("u/admin/smtp_password")
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = "Glia <cloud@emlondon.ca>"
+    message["To"] = ", ".join(recipients)
+    message.set_content(body)
+    with smtplib.SMTP_SSL("mail.tarek.org", 465, timeout=30) as smtp:
+        smtp.login("cloud@emlondon.ca", smtp_password)
+        smtp.send_message(message)
+    return {"ok": True, "to": recipients}
+
+
+def welcome_body(first, uid, password, mail, vpn, inbox):
+    return (
+        "Hello %s,\n\n"
+        "Welcome to Glia! An account has been created for you.\n\n"
+        "Username: %s\n"
+        "Temporary password: %s\n"
+        "Sign in: https://user.glia.org\n"
+        "Glia email: %s\n"
+        "VPN access requested: %s\n"
+        "Email inbox requested: %s\n\n"
+        "Please sign in and change your password immediately: open the menu and choose "
+        "\"Change password\". Then complete \"My profile\" with your phone, title, photo "
+        "and other details.\n\n"
+        "Your one-page account guide is in Nextcloud under Glia > Website & IT "
+        "(\"Glia Account Guide - Passwords and Personal Information.pdf\").\n\n"
+        "If you need help, contact the person who onboarded you or the Website & IT team.\n\n"
+        "Welcome aboard!\nGlia\n"
+    ) % (first, uid, password, mail, "yes" if vpn else "no", "yes" if inbox else "no")
+
+
+def submitter_body(first, last, uid, mail, vpn, inbox, personal, submitter):
+    return (
+        "Hello,\n\n"
+        "The onboarding form for %s %s has been processed by %s.\n\n"
+        "Username: %s\n"
+        "Account email: %s\n"
+        "Personal email: %s\n"
+        "VPN access requested: %s\n"
+        "Email inbox requested: %s\n\n"
+        "A welcome email with the username and temporary password was sent to %s.\n"
+        "VPN and mailbox provisioning are not automatic yet; please follow up separately.\n\n"
+        "The new member should sign in at https://user.glia.org and change the temporary password.\n"
+        "Guides: Nextcloud > Glia > Website & IT.\n\n"
+        "Glia onboarding automation\n"
+    ) % (first, last, submitter, uid, mail, personal or "-",
+         "yes" if vpn else "no", "yes" if inbox else "no", personal or "the new member")
+
+
+def processed_submissions():
+    try:
+        raw = wmill.get_variable("u/admin/onboarding_processed")
+        return set(json.loads(raw)) if raw else set()
+    except Exception:
+        return set()
+
+
 def main():
     ldap_pw = wmill.get_variable("u/admin/ldap_admin_password")
     data = nc_get("/forms/%d/submissions" % FORM_ID)
@@ -257,7 +352,14 @@ def main():
         raise RuntimeError("LDAP admin bind failed")
 
     created, skipped, errors = [], [], []
+    processed = processed_submissions()
+    newly_processed = set()
+    already_processed = []
     for submission in submissions:
+        submission_id = submission.get("id")
+        if submission_id in processed:
+            already_processed.append(submission_id)
+            continue
         ans = answers_by_question(submission)
         first = text(ans, Q_FIRST)
         last = text(ans, Q_LAST)
@@ -313,9 +415,36 @@ def main():
                 conn.modify(GROUP_DN, "memberUid", uid)
             except Exception:
                 pass
-            created.append({"uid": uid, "dn": dn, "mail": mail, "vpn": vpn, "inbox": inbox})
+            personal = text(ans, Q_EMAIL)
+            submitter = submission.get("userId", "unknown")
+            submitter_mail = ""
+            try:
+                info = conn.entry(submitter)
+                submitter_mail = (info.get("mail") or [""])[0]
+            except Exception:
+                submitter_mail = ""
+            email_status = []
+            try:
+                email_status.append({"kind": "new_user", "result": send_email(
+                    [personal], "Welcome to Glia! Your Glia account is ready",
+                    welcome_body(first, uid, password, mail, vpn, inbox))})
+            except Exception as exc:
+                errors.append({"submission": submission.get("id"), "uid": uid, "email": str(exc)})
+            try:
+                email_status.append({"kind": "submitter", "result": send_email(
+                    [submitter_mail], "Onboarding complete: %s %s (%s)" % (first, last, uid),
+                    submitter_body(first, last, uid, mail, vpn, inbox, personal, submitter))})
+            except Exception as exc:
+                errors.append({"submission": submission.get("id"), "uid": uid, "email": str(exc)})
+            created.append({"uid": uid, "dn": dn, "mail": mail, "vpn": vpn, "inbox": inbox,
+                            "emails": email_status})
+            newly_processed.add(submission_id)
         else:
             errors.append({"submission": submission.get("id"), "uid": uid, "ldap_result": rc})
 
+    if newly_processed:
+        wmill.set_variable("u/admin/onboarding_processed",
+                           json.dumps(sorted(processed | newly_processed)))
     conn.close()
-    return {"created": created, "skipped": skipped, "errors": errors, "submissions": len(submissions)}
+    return {"created": created, "skipped": skipped, "already_processed": already_processed,
+            "errors": errors, "submissions": len(submissions)}
